@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template untuk proyek akhir dicoding devops mengengah
+
+###########
+# Paramaters
+###########
+
+Parameters:
+
+  # VPC CIDR
+  MiraVPCCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  # Public Subnet CIDR
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.0.0.0/24
+
+  # AMI ID
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: Image Linux buat semua
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  # Keypair
+  KeyName:
+    Type: String
+    Description: Keyname buat EC2
+    Default: dicoding
+
+###########
+# Resources
+###########
+
+Resources:
+
+  # VPC
+  MiraVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref MiraVPCCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Mira VPC
+        - Key: Environment
+          Value: Production
+
+  # IGW
+  MiraIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Mira IGW
+
+  # Expose your VPC to the world (Config)
+  VPCtoIGWConnection:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+      - MiraIGW
+      - MiraVPC
+    Properties:
+      VpcId: !Ref MiraVPC
+      InternetGatewayId: !Ref MiraIGW
+
+  # Public Subnet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: MiraVPC
+    Properties:
+      VpcId: !Ref MiraVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Ref PublicSubnetCIDR
+      AvailabilityZone: !Select 
+        - 0
+        - !GetAZs 
+          Ref: AWS::Region
+      Tags:
+        - Key: Name
+          Value: Public Subnet
+
+  # Public Routing
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: MiraVPC
+    Properties:
+      VpcId: !Ref MiraVPC
+      Tags:
+        - Key: Name
+          Value: Public Route Table
+
+# Public Route (Config)
+  PublicRoute: 
+    Type: AWS::EC2::Route
+    DependsOn:
+      - PublicRouteTable
+      - MiraIGW
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref MiraIGW
+
+  # Public Subnet Association (Config)
+  PublicSubnetAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PublicSubnet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # App Security Group
+  MiraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: MiraVPC
+    Properties:
+      GroupName: MiraSecurity
+      GroupDescription: Enable SSH and HTTP access from everywhere
+      VpcId: !Ref MiraVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Sekuriti SSH
+
+  # Instance
+  PublicInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmazonLinuxAMIID
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref MiraSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Mira Server 2
+      UserData: !Base64
+        Fn::Sub:  |
+            #!/bin/bash
+            yum update -y
+            yum upgrade -y
+            yum install docker -y
+            sudo systemctl start docker
+            sudo chmod 666 /var/run/docker.sock
+            docker network create jenkins
+            docker run \
+            --name jenkins-docker \
+            --rm \
+            --detach \
+            --privileged \
+            --network jenkins \
+            --network-alias docker \
+            --env DOCKER_TLS_CERTDIR=/certs \
+            --volume jenkins-docker-certs:/certs/client \
+            --volume jenkins-data:/var/jenkins_home \
+            --publish 2376:2376 \
+            --publish 3000:3000 \
+            docker:dind \
+            --storage-driver overlay2
+            sleep 3
+            sudo amazon-linux-extras install nginx1 -y
+            sudo yum install git -y
+            git clone https://github.com/bangmira/simple-python-pyinstaller-app.git
+            yum clean all
